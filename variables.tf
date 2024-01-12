@@ -605,9 +605,9 @@ variable "alb_security_group_id" {
   type = string
 }
 
-variable "alb_target_group_arns" {
-  description = "ALB target group ARNs to add the Atlantis to"
-  type = list(string)
+variable "alb_listener_arn" {
+  description = "ALB listener ARN"
+  type = string
 }
 
 # Network
@@ -626,4 +626,22 @@ variable "private_subnets" {
   description = "A list of private subnets inside the VPC"
   type        = list(string)
   default     = []
+}
+
+variable "allow_unauthenticated_access" {
+  description = "Whether to create ALB listener rule to allow unauthenticated access for certain CIDR blocks (eg. allow GitHub webhooks to bypass OIDC authentication)"
+  type        = bool
+  default     = false
+}
+
+variable "allow_unauthenticated_access_priority" {
+  description = "ALB listener rule priority for allow unauthenticated access rule"
+  type        = number
+  default     = 10
+}
+
+variable "allow_unauthenticated_webhook_access_priority" {
+  description = "ALB listener rule priority for allow unauthenticated webhook access rule"
+  type        = number
+  default     = 15
 }

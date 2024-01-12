@@ -5,12 +5,13 @@ locals {
 
   # Atlantis
   atlantis_image = var.atlantis_image == "" ? "ghcr.io/runatlantis/atlantis:${var.atlantis_version}" : var.atlantis_image
-  atlantis_url = "https://${coalesce(
+  atlantis_host = coalesce(
     var.atlantis_fqdn,
     element(concat(aws_route53_record.atlantis[*].fqdn, [""]), 0),
     var.alb_dns_name,
     "_"
-  )}"
+  )
+  atlantis_url = "https://${local.atlantis_host}"
   atlantis_url_events = "${local.atlantis_url}/events"
 
   # Include only one group of secrets - for github, github app,  gitlab or bitbucket
@@ -122,6 +123,12 @@ locals {
     sourceVolume  = "efs-storage"
     readOnly      = "false"
   }]
+
+  # Chunk whitelisted CIDRs into groups of 5, the limit for IPs in an AWS lb listener
+  whitelist_unauthenticated_cidr_block_chunks = chunklist(
+    sort(compact(concat(var.allow_github_webhooks ? var.github_webhooks_cidr_blocks : [], var.whitelist_unauthenticated_cidr_blocks))),
+    5
+  )
 }
 
 data "aws_partition" "current" {}
@@ -576,6 +583,67 @@ data "aws_ecs_task_definition" "atlantis" {
   depends_on = [aws_ecs_task_definition.atlantis]
 }
 
+resource "aws_lb_listener_rule" "example" {
+  listener_arn = var.alb_listener_arn
+
+  condition {
+    host_header {
+      values = [local.atlantis_host]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.atlantis_service_target_group.arn
+  }
+}
+
+resource "aws_lb_target_group" "atlantis_service_target_group" {
+  name     = var.name
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = var.vpc_id
+  target_type = "ip"
+}
+
+# Forward action for certain CIDR blocks to bypass authentication (eg. GitHub webhooks)
+resource "aws_lb_listener_rule" "unauthenticated_access_for_cidr_blocks" {
+  count = var.allow_unauthenticated_access ? length(local.whitelist_unauthenticated_cidr_block_chunks) : 0
+
+  listener_arn = var.alb_listener_arn
+  priority     = var.allow_unauthenticated_access_priority + count.index
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.atlantis_service_target_group.arn
+  }
+
+  condition {
+    source_ip {
+      values = local.whitelist_unauthenticated_cidr_block_chunks[count.index]
+    }
+  }
+}
+
+# Forward action for certain URL paths to bypass authentication (eg. GitHub webhooks)
+resource "aws_lb_listener_rule" "unauthenticated_access_for_webhook" {
+  count = var.allow_unauthenticated_access && var.allow_github_webhooks ? 1 : 0
+
+  listener_arn = var.alb_listener_arn
+  priority     = var.allow_unauthenticated_webhook_access_priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.atlantis_service_target_group.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/events"]
+    }
+  }
+}
+
 resource "aws_ecs_service" "atlantis" {
   name    = var.name
   cluster = local.ecs_cluster_id
@@ -598,7 +666,7 @@ resource "aws_ecs_service" "atlantis" {
   load_balancer {
     container_name   = var.name
     container_port   = var.atlantis_port
-    target_group_arn = element(module.alb.target_group_arns, 0)
+    target_group_arn = aws_lb_target_group.atlantis_service_target_group.arn
   }
 
   dynamic "load_balancer" {
